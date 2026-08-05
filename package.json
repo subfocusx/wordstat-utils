@@ -1,0 +1,26 @@
+{
+  "name": "wordstat-utils",
+  "version": "1.4.0.0",
+  "private": true,
+  "description": "Chrome MV3 extension for collecting frequencies (W, «W», [W], «[!W]») from Yandex WordStat.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:watch": "node scripts/build.mjs --watch",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@babel/core": "^8.0.1",
+    "@babel/preset-env": "^8.0.2",
+    "@babel/preset-typescript": "^8.0.1",
+    "@types/chrome": "^0.0.270",
+    "babel-jest": "^30.4.1",
+    "esbuild": "^0.24.0",
+    "jest": "^30.4.2",
+    "jest-environment-jsdom": "^30.4.1",
+    "typescript": "^5.6.0"
+  }
+}
