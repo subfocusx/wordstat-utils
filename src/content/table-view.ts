@@ -21,12 +21,18 @@ interface TableViewState {
   pollIntervalId: ReturnType<typeof setInterval> | null;
 }
 
+/** Fires on tab close/navigation, where an interval would otherwise keep the
+ *  content script (and its 1 Hz DOM work) alive in the back/forward cache. */
+const PAGEHIDE_EVENT = 'pagehide';
+
 export class TableViewManager {
   private state: TableViewState = {
     headerInitialized: false,
     currentView: null,
     pollIntervalId: null
   };
+
+  private lifecycleHooksInstalled = false;
 
   private getCurrentView(): string | null {
     const wrapper = document.querySelector(DOM_SELECTORS.SETTINGS_WRAPPER);
@@ -83,4 +89,21 @@ export class TableViewManager {
   get headerInitialized(): boolean {
     return this.state.headerInitialized;
   }
+
+  /** Clear per-page DOM state so a re-injected content script rebuilds cleanly. */
+  dispose = (): void => {
+    this.stopPolling();
+    this.state.headerInitialized = false;
+    this.state.currentView = null;
+    this.lifecycleHooksInstalled = false;
+    window.removeEventListener(PAGEHIDE_EVENT, this.dispose);
+  };
+
+  /** Attach teardown to the page lifecycle. Safe to call more than once. */
+  installLifecycleHooks(): void {
+    if (this.lifecycleHooksInstalled) return;
+    this.lifecycleHooksInstalled = true;
+    window.addEventListener(PAGEHIDE_EVENT, this.dispose);
+  }
 }
+

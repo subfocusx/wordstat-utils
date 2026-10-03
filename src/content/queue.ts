@@ -13,17 +13,30 @@ interface RateLimitedQueue<T> {
 }
 
 export function createRateLimitedQueue<T>({ limiter, handler, shouldSkip }: CreateRateLimitedQueueOpts<T>): RateLimitedQueue<T> {
-  let cancelled = false;
+  // Cancellation is per-run: a queue instance is reused across runs (the
+  // fetcher creates one queue and calls run() for every batch). A cancel()
+  // from run #1 must not poison run #2.
+  let cancelCurrentRun: (() => void) | null = null;
 
   async function run(items: T[]): Promise<void> {
     const total = items.length;
-    if (total === 0) return;
+    if (total === 0) {
+      cancelCurrentRun = null;
+      return;
+    }
+
+    let cancelled = false;
+    cancelCurrentRun = (): void => {
+      cancelled = true;
+    };
 
     let inFlight = 0;
     let i = 0;
     let completed = 0;
 
-    await new Promise<void>((resolve) => {
+    try {
+      const { promise: finished, resolve } = Promise.withResolvers<void>();
+
       const maybeFinish = (): void => {
         // If cancelled, stop scheduling but let in-flight work settle so
         // run() never hangs (cancel() semantics = "stop starting new work").
@@ -37,14 +50,24 @@ export function createRateLimitedQueue<T>({ limiter, handler, shouldSkip }: Crea
           const item = items[idx];
           inFlight++;
 
-          if (shouldSkip && shouldSkip(item, idx)) {
+          let skip = false;
+          try {
+            skip = shouldSkip ? shouldSkip(item, idx) : false;
+          } catch (err: unknown) {
+            // A throwing predicate must not strand the slot or hang run().
+            logger.error('Queue shouldSkip() error:', err);
+            skip = true;
+          }
+          if (skip) {
             inFlight--;
             completed++;
             maybeFinish();
             continue;
           }
 
-          await new Promise((r) => setTimeout(r, limiter.getDelayMs()));
+          const { promise: paced, resolve: releaseSlot } = Promise.withResolvers<void>();
+          setTimeout(releaseSlot, limiter.nextDelayMs());
+          await paced;
           if (cancelled) {
             inFlight--;
             completed++;
@@ -68,11 +91,14 @@ export function createRateLimitedQueue<T>({ limiter, handler, shouldSkip }: Crea
       };
 
       void processNext();
-    });
+      await finished;
+    } finally {
+      cancelCurrentRun = null;
+    }
   }
 
   function cancel(): void {
-    cancelled = true;
+    cancelCurrentRun?.();
   }
 
   return { run, cancel };

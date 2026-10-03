@@ -6,10 +6,12 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:watch": "node scripts/build.mjs --watch",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
-    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
-    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
-    "typecheck": "tsc --noEmit",
+    "build:sourcemap": "node scripts/build.mjs --sourcemap",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
+    "lint": "tsc --noEmit -p tsconfig.tests.json",
     "verify": "npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {
@@ -17,10 +19,15 @@
     "@babel/preset-env": "^8.0.2",
     "@babel/preset-typescript": "^8.0.1",
     "@types/chrome": "^0.0.270",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^26.6.4",
     "babel-jest": "^30.4.1",
     "esbuild": "^0.24.0",
     "jest": "^30.4.2",
     "jest-environment-jsdom": "^30.4.1",
     "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=22.18"
   }
 }

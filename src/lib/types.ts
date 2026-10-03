@@ -5,7 +5,7 @@
 // need a separate `import type` as well.
 import { type APIRequestDefaults } from '../config.ts';
 
-export { type CacheShape, type CacheEntry } from '../config.ts';
+export { type CacheShape, type CacheEntry } from '../content/cache.ts';
 export { type APIRequestDefaults } from '../config.ts';
 export { type RateLimitConfig } from '../config.ts';
 export { type ColumnConfig } from '../config.ts';

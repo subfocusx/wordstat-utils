@@ -83,6 +83,13 @@ export class FetcherController {
   private _outputRenderPending = false;
   private _queueHandle: { cancel: () => void } | null = null;
   private _cancelRequested = false;
+  /**
+   * Monotonic run id. Cancelling the queue stops *scheduling*, but requests
+   * already in flight still resolve; every result carries the generation it
+   * was started in and is dropped when it no longer matches, so a late reply
+   * cannot repopulate a cancelled or already-cleared batch.
+   */
+  private _generation = 0;
 
   saveFetcherCheckboxStates() {
     const states: Record<string, boolean> = {};
@@ -138,7 +145,7 @@ export class FetcherController {
         c.progressErrors.style.display = 'none';
       }
     }
-    c.progressContainer.classList.toggle('has-errors', this.failedTasks.length > 0);
+    c.progressContainer.classList.toggle(CSS_CLASSES.PROGRESS_HAS_ERRORS, this.failedTasks.length > 0);
     c.progressContainer.style.display = 'flex';
   }
 
@@ -231,27 +238,35 @@ export class FetcherController {
     
     out.value = [...lines, ...failedLines].join('\n');
   }
-  
-  private addFailedTask(newError: FetcherError): boolean {
-    // Check if a similar error already exists for the same query/variant
-    const exists = this.failedTasks.some(
-      (existing) => existing.query === newError.query && 
-        existing.variantKey === newError.variantKey && 
-        existing.timestamp > Date.now() - 5000 // Prevent duplicates within 5 seconds
-    );
-    
-    if (!exists) {
-      this.failedTasks.push(newError);
-      this.updateFetcherOutputDisplay();
-      return true;
-    }
-    return false;
+  /** Key identifying "this query, this variant" for failure dedup. */
+  private _failedKey(err: FetcherError): string {
+    return `${err.jobIndex} ${err.variantKey}`;
   }
 
-  private async processFetcherQueueItem(task: FetcherTask) {
-    const { query, variantKey, apiQuery, jobIndex, region, deviceTypes, limiter } = task;
-    let resultValue = null;
+  /**
+   * Record a failure, replacing any earlier failure for the same query/variant.
+   * The previous 5-second window let a slow batch record the same error many
+   * times over; identity is stable for the whole run, so keying on it dedupes
+   * correctly no matter when the retries land.
+   */
+  private addFailedTask(newError: FetcherError): boolean {
+    const key = this._failedKey(newError);
+    const existingIndex = this.failedTasks.findIndex((e) => this._failedKey(e) === key);
+    if (existingIndex !== -1) {
+      this.failedTasks[existingIndex] = newError;
+      return false;
+    }
+    this.failedTasks.push(newError);
+    this.updateFetcherOutputDisplay();
+    return true;
+  }
 
+  private async processFetcherQueueItem(task: FetcherTask, generation = this._generation) {
+    const { query, variantKey, apiQuery, jobIndex, region, deviceTypes, limiter } = task;
+    let resultValue: string | number | null = null;
+    // A newer run (or a cancel/clear) started while this request was in flight:
+    // drop the answer instead of writing it into someone else's results.
+    if (generation !== this._generation) return;
     try {
       const cached = getVariantFromCache(query, region, deviceTypes, variantKey);
       if (cached !== null) {
@@ -291,6 +306,7 @@ export class FetcherController {
   }
 
   private async runFetcherQueue() {
+    const generation = ++this._generation;
     const total = this.fetchQueue.length;
     this.totalTasks = total;
     this.completedTasks = 0;
@@ -304,13 +320,15 @@ export class FetcherController {
     });
     const runner = createRateLimitedQueue({
       limiter,
-      handler: (task: FetcherTask) => this.processFetcherQueueItem(task)
+      handler: (task: FetcherTask) => this.processFetcherQueueItem(task, generation)
     });
     this._queueHandle = runner;
     this._cancelRequested = false;
     const runStart = Date.now();
     await runner.run(this.fetchQueue);
     this._queueHandle = null;
+    // A cancel/clear or a newer run took over the UI while we were awaiting.
+    if (generation !== this._generation) return;
     if (this._cancelRequested) {
       this._cancelRequested = false;
       this.enableFetcherUI();
@@ -337,6 +355,9 @@ export class FetcherController {
   cancelRunningBatch() {
     if (!this.isProcessing || !this._queueHandle) return;
     this._cancelRequested = true;
+    // Invalidate in-flight results: the queue stops scheduling, but requests
+    // already sent still resolve and must not land in the visible results.
+    this._generation++;
     this._queueHandle.cancel();
     this._queueHandle = null;
     this.enableFetcherUI();
@@ -374,8 +395,21 @@ export class FetcherController {
     if (c.outputArea) {
       c.outputArea.value = '';
       c.outputArea.placeholder = UI_TEXT.FETCHER_OUTPUT_PLACEHOLDER;
-      c.outputArea.classList.remove('success', 'error', CSS_CLASSES.FETCHER_PROCESSING);
+      c.outputArea.classList.remove(
+        CSS_CLASSES.FETCHER_OUTPUT_STATE_SUCCESS,
+        CSS_CLASSES.FETCHER_OUTPUT_STATE_ERROR,
+        CSS_CLASSES.FETCHER_PROCESSING
+      );
     }
+    // Clearing the visible output must also drop the state behind it, otherwise
+    // the next render (or an export) resurrects the previous batch.
+    this._generation++;
+    this.fetchQueue = [];
+    this.results = [];
+    this.failedTasks = [];
+    this.totalTasks = 0;
+    this.completedTasks = 0;
+    this.updateProgressBarDisplay();
   }
 
   handleFetcherStartClick() {
@@ -437,21 +471,21 @@ export class FetcherController {
       () => {
         const orig = out.placeholder;
         out.placeholder = UI_TEXT.FETCHER_COPY_SUCCESS;
-        out.classList.add('success');
-        out.classList.remove('error');
+        out.classList.add(CSS_CLASSES.FETCHER_OUTPUT_STATE_SUCCESS);
+        out.classList.remove(CSS_CLASSES.FETCHER_OUTPUT_STATE_ERROR);
         setTimeout(() => {
           if (out.placeholder === UI_TEXT.FETCHER_COPY_SUCCESS) out.placeholder = orig;
-          out.classList.remove('success');
+          out.classList.remove(CSS_CLASSES.FETCHER_OUTPUT_STATE_SUCCESS);
         }, 1500);
       },
       () => {
         const orig = out.placeholder;
         out.placeholder = UI_TEXT.FETCHER_COPY_FAIL;
-        out.classList.add('error');
-        out.classList.remove('success');
+        out.classList.add(CSS_CLASSES.FETCHER_OUTPUT_STATE_ERROR);
+        out.classList.remove(CSS_CLASSES.FETCHER_OUTPUT_STATE_SUCCESS);
         setTimeout(() => {
           if (out.placeholder === UI_TEXT.FETCHER_COPY_FAIL) out.placeholder = orig;
-          out.classList.remove('error');
+          out.classList.remove(CSS_CLASSES.FETCHER_OUTPUT_STATE_ERROR);
         }, 2000);
       }
     );
@@ -479,7 +513,7 @@ export class FetcherController {
 
   private _createActionButtons() {
     const row = document.createElement('div');
-    row.className = 'gfd_fetcher-button-row';
+    row.className = CSS_CLASSES.FETCHER_BUTTON_ROW;
     this.controls.button = createButton(
       UI_TEXT.FETCHER_BUTTON_TEXT,
       () => this.handleFetcherStartClick(),
@@ -487,7 +521,7 @@ export class FetcherController {
       '',
       false
     );
-    this.controls.button.classList.add(CSS_CLASSES.FETCHER_BUTTON, 'gfd_fetcher-fetch-button');
+    this.controls.button.classList.add(CSS_CLASSES.FETCHER_BUTTON, CSS_CLASSES.FETCHER_FETCH_BUTTON);
     row.appendChild(this.controls.button);
     this.controls.clearButton = createButton(
       '❌',
@@ -496,7 +530,7 @@ export class FetcherController {
       'Очистить поля ввода и вывода',
       false
     );
-    this.controls.clearButton.classList.add(CSS_CLASSES.FETCHER_BUTTON, 'gfd_fetcher-clear-button');
+    this.controls.clearButton.classList.add(CSS_CLASSES.FETCHER_BUTTON, CSS_CLASSES.FETCHER_CLEAR_BUTTON);
     row.appendChild(this.controls.clearButton);
     this.controls.cancelButton = createButton(
       UI_TEXT.FETCHER_CANCEL_BTN,
@@ -505,7 +539,7 @@ export class FetcherController {
       'Остановить текущий пакет',
       false
     );
-    this.controls.cancelButton.classList.add(CSS_CLASSES.FETCHER_BUTTON, 'gfd_fetcher-cancel-button');
+    this.controls.cancelButton.classList.add(CSS_CLASSES.FETCHER_BUTTON, CSS_CLASSES.FETCHER_CANCEL_BUTTON);
     this.controls.cancelButton.style.display = 'none';
     row.appendChild(this.controls.cancelButton);
     this.controls.retryButton = createButton(
@@ -515,7 +549,7 @@ export class FetcherController {
       'Повторить только неудачные запросы',
       false
     );
-    this.controls.retryButton.classList.add(CSS_CLASSES.FETCHER_BUTTON, 'gfd_fetcher-retry-button');
+    this.controls.retryButton.classList.add(CSS_CLASSES.FETCHER_BUTTON, CSS_CLASSES.FETCHER_RETRY_BUTTON);
     this.controls.retryButton.style.display = 'none';
     row.appendChild(this.controls.retryButton);
     return row;
@@ -523,18 +557,18 @@ export class FetcherController {
 
   private _createExportButtons(): HTMLElement {
     const row = document.createElement('div');
-    row.className = 'gfd_fetcher-export-row';
+    row.className = CSS_CLASSES.FETCHER_EXPORT_ROW;
     this.controls.exportButtons = {};
 
     const buttons: Array<{ fmt: ExportFormat; label: string; title: string }> = [
       { fmt: 'csv', label: 'CSV', title: 'Скачать результаты как CSV (Excel-compatible UTF-8)' },
       { fmt: 'tsv', label: 'TSV', title: 'Скачать результаты как TSV (вставляется в Excel/Google Sheets без разделителей)' },
-      { fmt: 'xlsx', label: 'XLS', title: 'Скачать результаты как Excel SpreadsheetML' }
+      { fmt: 'xls', label: 'XLS', title: 'Скачать результаты как Excel (.xls)' }
     ];
 
     for (const { fmt, label, title } of buttons) {
       const btn = createButton(label, () => this.handleExport(fmt), '', title, false);
-      btn.classList.add(CSS_CLASSES.FETCHER_BUTTON, 'gfd_fetcher-export-button', `gfd_fetcher-export-${fmt}`);
+      btn.classList.add(CSS_CLASSES.FETCHER_BUTTON, CSS_CLASSES.FETCHER_EXPORT_BUTTON, `gfd_fetcher-export-${fmt}`);
       row.appendChild(btn);
       this.controls.exportButtons![fmt] = btn;
     }
@@ -554,13 +588,18 @@ export class FetcherController {
       originalQuery: job.originalQuery,
       values: { ...job.values }
     }));
-    const opts = { selectedVariants: this.selectedVariants, bom: format === 'csv' };
+    // Read the columns as they are at export time: the user may have toggled
+    // checkboxes after the batch finished, and the file must match the UI.
+    const selectedVariants = FETCHER_VARIANT_ORDER.filter(
+      (k) => this.controls.checkboxes?.[k]?.checked
+    );
+    const opts = { selectedVariants, bom: format === 'csv' };
     let content: string;
     let mime: string;
     switch (format) {
       case 'csv': content = toCSV(rows, opts); mime = 'text/csv'; break;
       case 'tsv': content = toTSV(rows, opts); mime = 'text/tab-separated-values'; break;
-      case 'xlsx': content = toXLS(rows, opts); mime = 'application/vnd.ms-excel'; break;
+      case 'xls': content = toXLS(rows, opts); mime = 'application/vnd.ms-excel'; break;
     }
     try {
       downloadExport(filenameFor(format, rows), mime, content);
@@ -572,15 +611,15 @@ export class FetcherController {
 
   private _createProgressBar() {
     this.controls.progressContainer = document.createElement('div');
-    this.controls.progressContainer.className = 'gfd_fetcher-progress-container';
+    this.controls.progressContainer.className = CSS_CLASSES.PROGRESS_CONTAINER;
     this.controls.progressContainer.style.display = 'none';
     this.controls.progressBar = document.createElement('div');
-    this.controls.progressBar.className = 'gfd_fetcher-progress-bar';
+    this.controls.progressBar.className = CSS_CLASSES.PROGRESS_BAR;
     this.controls.progressText = document.createElement('span');
-    this.controls.progressText.className = 'gfd_fetcher-progress-text';
+    this.controls.progressText.className = CSS_CLASSES.PROGRESS_TEXT;
     this.controls.progressText.textContent = '0/0 · 0%';
     this.controls.progressErrors = document.createElement('span');
-    this.controls.progressErrors.className = 'gfd_fetcher-progress-errors';
+    this.controls.progressErrors.className = CSS_CLASSES.PROGRESS_ERRORS;
     this.controls.progressErrors.style.display = 'none';
     this.controls.progressContainer.appendChild(this.controls.progressBar);
     this.controls.progressContainer.appendChild(this.controls.progressText);
@@ -610,6 +649,15 @@ export class FetcherController {
   }
 }
 
+const TOAST_KIND_CLASSES = {
+  success: CSS_CLASSES.TOAST_SUCCESS,
+  error: CSS_CLASSES.TOAST_ERROR,
+  warn: CSS_CLASSES.TOAST_WARN,
+  info: CSS_CLASSES.TOAST_INFO
+} as const;
+
+const TOAST_STACK_ID = `${CSS_CLASSES.TOAST}_stack`;
+
 /**
  * Lightweight toast notification. Replaces native alert() so the main thread
  * stays responsive while the user is mid-batch. Multiple toasts stack vertically.
@@ -617,13 +665,13 @@ export class FetcherController {
 export function showToast(message: string, kind: 'success' | 'error' | 'warn' | 'info' = 'info', durationMs = 3500): void {
   const stack = _ensureToastStack();
   const toast = document.createElement('div');
-  toast.className = `gfd_toast gfd_toast_${kind}`;
+  toast.className = `${CSS_CLASSES.TOAST} ${TOAST_KIND_CLASSES[kind]}`;
   toast.textContent = message;
   stack.appendChild(toast);
   // Trigger CSS transition by adding the visible class on next frame.
-  requestAnimationFrame(() => toast.classList.add('gfd_toast_visible'));
+  requestAnimationFrame(() => toast.classList.add(CSS_CLASSES.TOAST_VISIBLE));
   setTimeout(() => {
-    toast.classList.remove('gfd_toast_visible');
+    toast.classList.remove(CSS_CLASSES.TOAST_VISIBLE);
     toast.addEventListener('transitionend', () => toast.remove(), { once: true });
     // Failsafe in case transitionend doesn't fire (browser tab in background).
     setTimeout(() => toast.remove(), 600);
@@ -631,10 +679,10 @@ export function showToast(message: string, kind: 'success' | 'error' | 'warn' | 
 }
 
 function _ensureToastStack(): HTMLElement {
-  let stack = document.getElementById('gfd_toast_stack');
+  let stack = document.getElementById(TOAST_STACK_ID);
   if (stack) return stack as HTMLElement;
   stack = document.createElement('div');
-  stack.id = 'gfd_toast_stack';
+  stack.id = TOAST_STACK_ID;
   document.body.appendChild(stack);
   return stack;
 }

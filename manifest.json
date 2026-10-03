@@ -17,36 +17,20 @@
         "content.js"
       ],
       "matches": [
-        "*://wordstat.yandex.ru/*",
-        "*://wordstat.yandex.com/*"
+        "*://wordstat.yandex.ru/*"
       ],
       "run_at": "document_idle"
     }
   ],
   "description": "StatDev: собирайте частоты W, «W», [W] и «[!W]» из Яндекс WordStat.",
   "host_permissions": [
-    "*://*.yandex.ru/*"
+    "*://wordstat.yandex.ru/*"
   ],
   "icons": {
     "128": "images/icon128.png"
   },
   "manifest_version": 3,
   "name": "StatDev",
-  "permissions": [
-    "storage",
-    "cookies",
-    "activeTab",
-    "scripting",
-    "alarms"
-  ],
-  "update_url": "https://clients2.google.com/service/update2/crx",
   "version": "1.4.0.0",
-  "web_accessible_resources": [
-    {
-      "matches": [
-        "<all_urls>"
-      ],
-      "resources": []
-    }
-  ]
+  "update_url": "https://clients2.google.com/service/update2/crx"
 }

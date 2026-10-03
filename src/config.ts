@@ -20,11 +20,17 @@ export interface APIRequestDefaults {
   endDate: string;
 }
 
+// Local calendar dates, no toISOString(): Yandex expects the user's local
+// day, and toISOString() rolls the date back in UTC+ zones.
 export function getAPIRequestDefaults(): APIRequestDefaults {
+  const now = new Date();
+  const start = new Date(now.getFullYear() - 2, now.getMonth(), now.getDate());
+  const ymd = (d: Date): string =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   return {
     currentDevice: 'desktop,phone,tablet',
-    startDate: new Date(new Date().setFullYear(new Date().getFullYear() - 2)).toISOString().substring(0, 10),
-    endDate: new Date().toISOString().substring(0, 10)
+    startDate: ymd(start),
+    endDate: ymd(now)
   };
 }
 
@@ -34,8 +40,10 @@ export const CONTENT_TYPE = { JSON: 'application/json' } as const;
 // --- Fetching Behavior ---
 export const FETCH_MAX_RETRIES = 3;
 export const FETCH_RETRY_DELAY_MS = 1000;
-// Hard cap on the single-attempt backoff sleep. Prevents a failing tail item
-// from holding a queue slot for 1+2+4s (or more) on top of the fetch itself.
+// Hard cap on the single-attempt backoff sleep. Defensive only: with
+// FETCH_MAX_RETRIES=3 and FETCH_RETRY_DELAY_MS=1000 the largest computed
+// backoff is 1000 * 2^2 = 4000 ms, so this cap never binds at current
+// settings — it exists so raising the retry count cannot blow up a slot.
 export const FETCH_MAX_RETRY_DELAY_MS = 5000;
 // Abort a background fetch after this long. A request that Yandex throttles
 // or drops silently otherwise occupies a concurrency slot indefinitely.
@@ -49,7 +57,8 @@ export const LOG_LEVEL: LogLevel = 'info';
 export const LOG_BUFFER_SIZE = 200;
 export const LS_LOG_KEY = `${PREFIX}Logs`;
 
-// --- Adaptive Rate Limiting (Tier-2) ---// Soft corridor: 18..25 concurrent, 350..750 ms between starts.
+// --- Adaptive Rate Limiting (Tier-2) ---
+// Soft corridor: 5..25 concurrent, 350..2000 ms between starts.
 // Auto-adapts: speeds up on sustained successes with low latency,
 // slows down hard on 429/5xx responses.
 export interface RateLimitConfig {
@@ -97,7 +106,6 @@ export const LS_FETCHER_POS_KEY = `${PREFIX}FetcherPos`;
 export const LS_FETCHER_SIZE_KEY = `${PREFIX}FetcherSize`;
 
 export const LS_CHECKBOX_KEY = `${PREFIX}Checkbox_State`;
-export const LS_TABLE_CHECKBOX_KEY = `${PREFIX}Table_Checkbox_State`;
 export const LS_FETCHER_CHECKBOX_KEY = `${PREFIX}Fetcher_Checkbox_State`;
 
 // --- Fetcher panel size ---
@@ -118,7 +126,8 @@ export const DOM_SELECTORS = {
   KEYWORD_LINK: 'a',
   SHOW_MORE_BUTTON: '.wordstat__show-more-button',
   POPULAR_TAB: '#popular',
-  ASSOCIATIONS_TAB: '#associations'
+  ASSOCIATIONS_TAB: '#associations',
+  DEVICE_CHECKBOXES: ".wordstat__device-types input[type='checkbox']"
 } as const;
 
 export const VIEW_CLASSES = {
@@ -153,6 +162,35 @@ export const CSS_CLASSES = {
   FETCHER_PROCESSING: `${PREFIX}fetcher-processing`,
   FETCHER_OUTPUT_SUCCESS: `${PREFIX}fetcher-output-success`,
   FETCHER_OUTPUT_ERROR: `${PREFIX}fetcher-output-error`,
+  FETCHER_BUTTON_ROW: `${PREFIX}fetcher-button-row`,
+  FETCHER_EXPORT_ROW: `${PREFIX}fetcher-export-row`,
+  FETCHER_FETCH_BUTTON: `${PREFIX}fetcher-fetch-button`,
+  FETCHER_CLEAR_BUTTON: `${PREFIX}fetcher-clear-button`,
+  FETCHER_CANCEL_BUTTON: `${PREFIX}fetcher-cancel-button`,
+  FETCHER_RETRY_BUTTON: `${PREFIX}fetcher-retry-button`,
+  FETCHER_EXPORT_BUTTON: `${PREFIX}fetcher-export-button`,
+  PROGRESS_CONTAINER: `${PREFIX}fetcher-progress-container`,
+  PROGRESS_BAR: `${PREFIX}fetcher-progress-bar`,
+  PROGRESS_TEXT: `${PREFIX}fetcher-progress-text`,
+  PROGRESS_ERRORS: `${PREFIX}fetcher-progress-errors`,
+  PROGRESS_HAS_ERRORS: 'has-errors',
+  // State classes applied to the output textarea (styles/fetcher.css targets
+  // `.gfd_fetcher-output.success` / `.error`, so these stay unprefixed).
+  FETCHER_OUTPUT_STATE_SUCCESS: 'success',
+  FETCHER_OUTPUT_STATE_ERROR: 'error',
+  TOAST: `${PREFIX}toast`,
+  TOAST_VISIBLE: `${PREFIX}toast_visible`,
+  TOAST_SUCCESS: `${PREFIX}toast_success`,
+  TOAST_ERROR: `${PREFIX}toast_error`,
+  TOAST_WARN: `${PREFIX}toast_warn`,
+  TOAST_INFO: `${PREFIX}toast_info`,
+  FETCHER_BANNER_CONTAINER_ID: 'fetcher-banner-container',
+  FETCHER_BANNER_HEADER: 'fetcher-banner-header',
+  FETCHER_BANNER_TITLE: 'fetcher-banner-title',
+  FETCHER_BANNER_DRAG: 'fetcher-banner-drag',
+  FETCHER_BANNER_HIDE: 'fetcher-banner-hide-button',
+  FETCHER_BANNER_SHOW: 'fetcher-banner-show-button',
+  FETCHER_BANNER_RESIZE_HANDLE: 'fetcher-banner-resize-handle',
   SORTABLE_COLUMN: 'table__column_sortable',
   SORTED_COLUMN: 'table__column_sorted'
 } as const;
@@ -165,11 +203,18 @@ export const DATASET_KEYS = {
   CLICK_LISTENER: 'gfdClickListener',
   TABLE_CHECKBOX_INDEX: 'gfdTableIndex',
   FETCHER_VARIANT: 'gfdFetcherVariant',
+  /** Original Yandex keyword-link href, kept so we never destroy navigation. */
+  ORIGINAL_HREF: `${PREFIX}originalHref`,
   CELL_STATE: `${PREFIX}cellState`
 } as const;
 
-// --- UI Configuration ---
-export const UPDATE_INTERVAL_MS = 1000;
+// --- Device types ---
+// WordStat exposes desktop/phone/tablet checkboxes. Their DOM order is not
+// guaranteed across Yandex redesigns, so we read the device from the
+// checkbox's own attributes first and only fall back to positional order.
+export const DEVICE_TYPE_ORDER = ['desktop', 'phone', 'tablet'] as const;
+export type DeviceType = typeof DEVICE_TYPE_ORDER[number];
+
 
 export interface ColumnConfig {
   text: string;
@@ -299,27 +344,11 @@ export const SCRIPT_LOADED_FLAG = `${PREFIX}ScriptLoaded`;
 
 // --- Fetcher Banner State ---
 // [M8] Whitelist of allowed fetch targets inside the background service worker.
-export const BACKGROUND_ALLOWED_ORIGINS = new Set(['https://wordstat.yandex.ru']);
-export const BACKGROUND_ALLOWED_PATHS = new Set(['/wordstat/api/search']);
+// Exact origins only — no suffix matching, so a subdomain must be listed here.
+export const BACKGROUND_ALLOWED_ORIGINS: Readonly<Record<string, true>> = {
+  'https://wordstat.yandex.ru': true
+};
+export const BACKGROUND_ALLOWED_PATHS: Readonly<Record<string, true>> = {
+  '/wordstat/api/search': true
+};
 
-// [C3 fix#2] API format fingerprint — bumped automatically by health-check
-// when we observe a new response shape.
-export const LS_API_FORMAT_VERSION_KEY = `${PREFIX}ApiFormatVersion`;
-
-/** Strongly-typed cache entry shape. */
-export interface CacheEntry {
-  date: string;
-  lastAccessedAt: number;
-  base: string | number | null;
-  variants: Array<string | number | null>;
-  errored?: boolean;
-}
-
-/** Strongly-typed cache map. */
-export interface CacheShape {
-  [query: string]: {
-    [region: string]: {
-      [device: string]: CacheEntry;
-    };
-  };
-}

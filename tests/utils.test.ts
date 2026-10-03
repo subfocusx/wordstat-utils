@@ -6,8 +6,7 @@ import {
   getApiQueryForVariant,
   isColumnEnabled,
   getCurrentRegion,
-  getCurrentDeviceTypes,
-  valueToCellState
+  getCurrentDeviceTypes
 } from '../src/content/utils.ts';
 import { CELL_STATE, CELL_STATE_GLYPH, COLUMN_INDEX, REGEX } from '../src/config.ts';
 
@@ -26,6 +25,14 @@ describe('formatNumber', () => {
   });
   test('handles zero', () => {
     expect(formatNumber(0)).toBe('0');
+  });
+  test('keeps decimal fractions and groups only the integer part', () => {
+    expect(formatNumber('1 234,5')).toBe('1 234.5');
+    expect(formatNumber(1234.5)).toBe('1 234.5');
+  });
+  test('returns DISABLED glyph for an empty string', () => {
+    expect(formatNumber('')).toBe(CELL_STATE_GLYPH[CELL_STATE.DISABLED]);
+    expect(formatNumber('   ')).toBe(CELL_STATE_GLYPH[CELL_STATE.DISABLED]);
   });
 });
 
@@ -128,6 +135,16 @@ describe('getCurrentDeviceTypes', () => {
   test('falls back to all three when no checkboxes present', () => {
     expect(getCurrentDeviceTypes()).toBe('desktop,phone,tablet');
   });
+  test('reads devices from checkbox attributes instead of DOM order', () => {
+    document.body.innerHTML = `
+      <div class="wordstat__device-types">
+        <input type="checkbox" data-device="tablet" checked />
+        <input type="checkbox" data-device="desktop" />
+        <input type="checkbox" data-device="phone" checked />
+      </div>`;
+    expect(getCurrentDeviceTypes()).toBe('tablet,phone');
+    document.body.innerHTML = '';
+  });
   test('returns only checked devices', () => {
     document.body.innerHTML = `
       <div class="wordstat__device-types">
@@ -137,21 +154,5 @@ describe('getCurrentDeviceTypes', () => {
       </div>`;
     expect(getCurrentDeviceTypes()).toBe('desktop,tablet');
     document.body.innerHTML = '';
-  });
-});
-
-describe('valueToCellState', () => {
-  test('null/undefined → DISABLED', () => {
-    expect(valueToCellState(null)).toBe(CELL_STATE.DISABLED);
-    expect(valueToCellState(undefined)).toBe(CELL_STATE.DISABLED);
-  });
-  test('numeric → VALUE', () => {
-    expect(valueToCellState(1234)).toBe(CELL_STATE.VALUE);
-  });
-  test('numeric string with spaces → VALUE', () => {
-    expect(valueToCellState('1 234')).toBe(CELL_STATE.VALUE);
-  });
-  test('non-numeric → DISABLED', () => {
-    expect(valueToCellState('abc')).toBe(CELL_STATE.DISABLED);
   });
 });

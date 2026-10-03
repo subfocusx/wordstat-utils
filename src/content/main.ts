@@ -28,13 +28,14 @@ function applyYandexRateLimitFix(): void {
 }
 
 function initializeOrUpdateTable(): void {
+  viewManager.installLifecycleHooks();
   viewManager.initializeTable();
   viewManager.startPolling();
 }
 
 function run(): void {
   const controller = createFetcherBanner();
-  initializeShortcuts(controller);
+  if (controller) initializeShortcuts(controller);
 }
 
 // [MIRRORS ORIGINAL v1.3.2.2 content_script.js:143-144] — runs at

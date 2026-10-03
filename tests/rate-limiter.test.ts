@@ -42,31 +42,67 @@ describe('AdaptiveRateLimiter', () => {
     expect(lim.getConcurrency()).toBe(RATE_LIMIT.initialConcurrency);
   });
 
-  test('recovers after a long success streak even if latency stays high', () => {
+  test('does NOT recover while latency stays high, however long the streak', () => {
     const lim = new AdaptiveRateLimiter(RATE_LIMIT);
     // Slow down first so there is room to recover.
     lim.recordResult({ status: 429, latencyMs: 100 });
     const slowC = lim.getConcurrency();
     const slowD = lim.getDelayMs();
     expect(slowC).toBeLessThan(RATE_LIMIT.initialConcurrency);
-    // Latency stays above speedUpMaxLatencyMs the whole time, so only
-    // persistence (minOk * 2 consecutive successes) should unstick it.
-    for (let i = 0; i < RATE_LIMIT.speedUpMinSuccesses * 2; i++) {
-      lim.recordResult({ status: 200, latencyMs: RATE_LIMIT.speedUpMaxLatencyMs + 500 });
-    }
-    expect(lim.getConcurrency()).toBeGreaterThan(slowC);
-    expect(lim.getDelayMs()).toBeLessThan(slowD);
-  });
-
-  test('does not recover before the persistence threshold', () => {
-    const lim = new AdaptiveRateLimiter(RATE_LIMIT);
-    lim.recordResult({ status: 429, latencyMs: 100 });
-    const slowC = lim.getConcurrency();
-    // Just short of the persistence threshold, still no speed-up.
-    for (let i = 0; i < RATE_LIMIT.speedUpMinSuccesses * 2 - 1; i++) {
+    // Latency stays above speedUpMaxLatencyMs the whole time. There is
+    // deliberately no persistence escape hatch any more: a long success
+    // streak must not ramp the queue up while the API is clearly struggling.
+    for (let i = 0; i < RATE_LIMIT.speedUpMinSuccesses * 4; i++) {
       lim.recordResult({ status: 200, latencyMs: RATE_LIMIT.speedUpMaxLatencyMs + 500 });
     }
     expect(lim.getConcurrency()).toBe(slowC);
+    expect(lim.getDelayMs()).toBe(slowD);
+  });
+
+  test('recovers once latency comes back under the threshold', () => {
+    const lim = new AdaptiveRateLimiter(RATE_LIMIT);
+    lim.recordResult({ status: 429, latencyMs: 100 });
+    const slowC = lim.getConcurrency();
+    for (let i = 0; i < RATE_LIMIT.speedUpMinSuccesses; i++) {
+      lim.recordResult({ status: 200, latencyMs: 100 });
+    }
+    expect(lim.getConcurrency()).toBeGreaterThan(slowC);
+  });
+
+  test('failures do not poison the latency EMA', () => {
+    const lim = new AdaptiveRateLimiter(RATE_LIMIT);
+    for (let i = 0; i < 10; i++) {
+      lim.recordResult({ status: 200, latencyMs: 100 });
+    }
+    const before = lim.snapshot().latencyEMA;
+    // A throttled request with a huge latency must not raise the EMA.
+    lim.recordResult({ status: 429, latencyMs: 30000 });
+    expect(lim.snapshot().latencyEMA).toBe(before);
+    for (let i = 0; i < RATE_LIMIT.speedUpMinSuccesses; i++) {
+      lim.recordResult({ status: 200, latencyMs: 100 });
+    }
+    expect(lim.getConcurrency()).toBeGreaterThan(RATE_LIMIT.minConcurrency);
+  });
+
+  test('status 0 (no HTTP status) resets the streak without slowing down', () => {
+    const lim = new AdaptiveRateLimiter(RATE_LIMIT);
+    for (let i = 0; i < RATE_LIMIT.speedUpMinSuccesses - 1; i++) {
+      lim.recordResult({ status: 200, latencyMs: 100 });
+    }
+    lim.recordResult({ status: 0, latencyMs: 100 });
+    expect(lim.snapshot().successStreak).toBe(0);
+    // Not throttling: concurrency must not drop.
+    expect(lim.getConcurrency()).toBe(RATE_LIMIT.initialConcurrency);
+  });
+
+  test('nextDelayMs stays within ±20% of the configured delay', () => {
+    const lim = new AdaptiveRateLimiter(RATE_LIMIT);
+    const base = lim.getDelayMs();
+    for (let i = 0; i < 200; i++) {
+      const d = lim.nextDelayMs();
+      expect(d).toBeGreaterThanOrEqual(Math.round(base * 0.8));
+      expect(d).toBeLessThanOrEqual(Math.round(base * 1.2));
+    }
   });
 
   test('caps concurrency at maxConcurrency', () => {

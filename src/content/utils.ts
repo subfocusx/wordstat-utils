@@ -7,20 +7,41 @@ import {
   CELL_STATE_GLYPH,
   COLUMN_INDEX,
   CSS_CLASSES,
+  DATASET_KEYS,
+  DEVICE_TYPE_ORDER,
   DOM_SELECTORS,
-  REGEX,
-  DATASET_KEYS
+  REGEX
 } from '../config.ts';
 
-import { type CellState, type FetcherVariantKey } from '../config.ts';
+import { type FetcherVariantKey } from '../config.ts';
 import { logger } from './logger.ts';
 
+/** Group the integer part with thin spaces: 1234567 -> "1 234 567". */
+function groupThousands(intPart: string): string {
+  return intPart.replace(REGEX.THOUSANDS_SEP, ' ');
+}
+
+/**
+ * Render a frequency for display.
+ *
+ * WordStat returns either a number or a space-grouped string. Non-breaking
+ * spaces are stripped before parsing, but decimal fractions (both "1234.5" and
+ * the Russian "1234,5") must survive — grouping is applied to the integer part
+ * only. An empty or non-numeric value renders as the DISABLED glyph rather than
+ * "0", which used to happen because Number('') === 0.
+ */
 export function formatNumber(num: string | number | null | undefined): string {
   if (num === null || num === undefined) return CELL_STATE_GLYPH[CELL_STATE.DISABLED];
-  const cleaned = String(num).replace(REGEX.NON_DIGIT_SPACE, '');
+  const cleaned = String(num).replace(REGEX.NON_DIGIT_SPACE, '').replace(',', '.');
+  if (cleaned === '' || !/^-?\d*\.?\d+$/.test(cleaned)) {
+    return CELL_STATE_GLYPH[CELL_STATE.DISABLED];
+  }
   const numericValue = Number(cleaned);
-  if (Number.isNaN(numericValue)) return CELL_STATE_GLYPH[CELL_STATE.DISABLED];
-  return numericValue.toString().replace(REGEX.THOUSANDS_SEP, ' ');
+  if (!Number.isFinite(numericValue)) return CELL_STATE_GLYPH[CELL_STATE.DISABLED];
+  const dot = cleaned.indexOf('.');
+  const intPart = dot === -1 ? cleaned : cleaned.slice(0, dot);
+  const fracPart = dot === -1 ? '' : cleaned.slice(dot);
+  return groupThousands(intPart) + fracPart;
 }
 
 export function getQueryForRow(row: HTMLTableRowElement | null | undefined): string | null {
@@ -116,32 +137,62 @@ export function getCurrentRegion(): string | null {
     const urlParams = new URLSearchParams(window.location.search);
     const regionParam = urlParams.get('region');
     if (!regionParam) return null;
-    return decodeURIComponent(regionParam.replace(/%2C/g, ','));
+    // URLSearchParams already percent-decodes; decoding again would mangle a
+    // region that legitimately contains a '%' sequence.
+    const region = regionParam.trim();
+    return region === '' ? null : region;
   } catch {
     return null;
   }
 }
 
+/**
+ * Read the checked device filters as a comma-separated list.
+ *
+ * The DOM order of WordStat's device checkboxes is not guaranteed across
+ * redesigns, so each checkbox is labelled from its own attributes
+ * (data-device / value / id / label text) and only falls back to positional
+ * order when none of those identify it.
+ */
 export function getCurrentDeviceTypes(): string {
-  const deviceCheckboxes = document.querySelectorAll(
-    ".wordstat__device-types input[type='checkbox']"
+  const checkboxes = Array.from(
+    document.querySelectorAll<HTMLInputElement>(DOM_SELECTORS.DEVICE_CHECKBOXES)
   );
-  const deviceMap = ['desktop', 'phone', 'tablet'] as const;
   const selectedDevices: string[] = [];
-  for (let i = 0; i < deviceMap.length; i++) {
-    const cb = deviceCheckboxes[i] as HTMLInputElement | undefined;
-    if (cb && cb.checked) selectedDevices.push(deviceMap[i]);
-  }
+  checkboxes.forEach((cb, index) => {
+    if (!cb.checked) return;
+    const device = deviceTypeForCheckbox(cb, index);
+    if (device && !selectedDevices.includes(device)) selectedDevices.push(device);
+  });
   if (selectedDevices.length === 0) {
-    logger.warn('No device types selected, falling back to defaults.');
-    return 'desktop,phone,tablet';
+    warnNoDevicesOnce();
+    return DEVICE_TYPE_ORDER.join(',');
   }
   return selectedDevices.join(',');
 }
 
-export function valueToCellState(value: unknown): CellState {
-  if (value === null || value === undefined) return CELL_STATE.DISABLED;
-  const cleaned = String(value).replace(REGEX.NON_DIGIT_SPACE, '');
-  const num = Number(cleaned);
-  return Number.isNaN(num) ? CELL_STATE.DISABLED : CELL_STATE.VALUE;
+
+
+function deviceTypeForCheckbox(cb: HTMLInputElement, index: number): string | null {
+  const candidates = [
+    cb.getAttribute('data-device'),
+    cb.value,
+    cb.id,
+    cb.closest('label')?.textContent
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const normalized = candidate.trim().toLowerCase();
+    const match = DEVICE_TYPE_ORDER.find((d) => normalized.includes(d));
+    if (match) return match;
+  }
+  return DEVICE_TYPE_ORDER[index] ?? null;
+}
+
+/** getCurrentDeviceTypes runs on every 1 Hz tick; log its fallback only once. */
+let warnedAboutDevices = false;
+function warnNoDevicesOnce(): void {
+  if (warnedAboutDevices) return;
+  warnedAboutDevices = true;
+  logger.warn('No device types selected, falling back to defaults.');
 }

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noImplicitAny": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": false,
+    "types": ["chrome", "node", "jest"]
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}

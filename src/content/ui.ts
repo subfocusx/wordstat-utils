@@ -47,33 +47,39 @@ function setCellState(cell: HTMLElement, state: CellState, opts: SetCellStateOpt
   if (!cell) return;
   cell.dataset[DATASET_KEYS.CELL_STATE] = state;
   if (state === CELL_STATE.VALUE) {
+    // A stale ERROR / "column disabled" tooltip must not survive into a value.
+    cell.title = '';
     if (opts.value === null || opts.value === undefined) {
       cell.dataset[DATASET_KEYS.CELL_STATE] = CELL_STATE.DISABLED;
       cell.textContent = CELL_STATE_GLYPH[CELL_STATE.DISABLED];
     } else {
       cell.textContent = formatNumber(opts.value);
-      cell.title = '';
     }
   } else {
     cell.textContent = CELL_STATE_GLYPH[state] ?? '';
   }
 }
 
+/**
+ * Rewrite Yandex's base-frequency header cell in place.
+ *
+ * This used to `cloneNode(true)` + `replaceChild`, which detached the cell
+ * from state Yandex keeps outside the DOM (framework props, keyed node maps),
+ * so a later header re-render could resurrect the discarded node. Editing the
+ * existing node preserves the identity Yandex expects.
+ */
 export function createBaseFrequencyHeaderCell(headerRow: HTMLTableRowElement): void {
-  const originalCell = headerRow.children[COLUMN_INDEX.BASE_FREQUENCY] as HTMLElement | undefined;
-  if (!originalCell) return;
+  const cell = headerRow.children[COLUMN_INDEX.BASE_FREQUENCY] as HTMLElement | undefined;
+  if (!cell) return;
 
-  const clonedCell = originalCell.cloneNode(true) as HTMLElement;
-  originalCell.parentNode!.replaceChild(clonedCell, originalCell);
-
-  clonedCell.innerHTML = '';
-  clonedCell.classList.remove(CSS_CLASSES.SORTABLE_COLUMN, CSS_CLASSES.SORTED_COLUMN);
-  clonedCell.classList.add(CSS_CLASSES.HEADER_CELL, CSS_CLASSES.HEADER_CELL_NO_SORT);
-  clonedCell.title = '';
+  cell.innerHTML = '';
+  cell.classList.remove(CSS_CLASSES.SORTABLE_COLUMN, CSS_CLASSES.SORTED_COLUMN);
+  cell.classList.add(CSS_CLASSES.HEADER_CELL, CSS_CLASSES.HEADER_CELL_NO_SORT);
+  cell.title = '';
 
   const label = document.createElement('span');
   label.textContent = UI_TEXT.BASE_FREQ_HEADER;
-  clonedCell.appendChild(label);
+  cell.appendChild(label);
 
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
@@ -82,11 +88,12 @@ export function createBaseFrequencyHeaderCell(headerRow: HTMLTableRowElement): v
   checkbox.dataset[DATASET_KEYS.TABLE_CHECKBOX_INDEX] = String(COLUMN_INDEX.BASE_FREQUENCY);
   checkbox.title = UI_TEXT.BASE_FREQ_TITLE;
   checkbox.addEventListener(EVENTS.CHANGE, (e: Event) => {
+    e.stopPropagation();
     const target = e.target as HTMLInputElement;
     toggleColumnState(COLUMN_INDEX.BASE_FREQUENCY, target.checked);
     saveCheckboxStates();
   });
-  clonedCell.appendChild(checkbox);
+  cell.appendChild(checkbox);
 }
 
 export function createFetchableHeaderCell(config: ColumnConfig): HTMLTableHeaderCellElement {
@@ -156,7 +163,18 @@ export function ensureCellCount(row: HTMLTableRowElement): void {
 
 export function setupKeywordCell(cell: HTMLElement): void {
   if (!cell || cell.dataset[DATASET_KEYS.CLICK_LISTENER]) return;
-  cell.querySelector(DOM_SELECTORS.KEYWORD_LINK)?.removeAttribute('href');
+  const link = cell.querySelector<HTMLAnchorElement>(DOM_SELECTORS.KEYWORD_LINK);
+  if (link?.hasAttribute('href')) {
+    // Keep WordStat's own navigation intact — a click on the keyword should
+    // open the phrase page, not be swallowed by our row handler. We only make
+    // it open in a new tab so the results table survives, and stash the
+    // original href so it can always be restored.
+    if (!link.dataset[DATASET_KEYS.ORIGINAL_HREF]) {
+      link.dataset[DATASET_KEYS.ORIGINAL_HREF] = link.getAttribute('href') ?? '';
+    }
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  }
   cell.classList.add(CSS_CLASSES.KEYWORD_CELL);
   cell.title = UI_TEXT.KEYWORD_CELL_TITLE;
   cell.addEventListener(EVENTS.CLICK, handleRowClick);
@@ -221,17 +239,34 @@ export function updateRowDisplayFromCache(row: HTMLTableRowElement, cachedEntry:
     const busy = isCellLoadingOrError(cell);
 
     if (columnEnabled && !busy) {
-      const value = cachedEntry?.variants?.[resultIndex];
-      if (value === null || value === undefined) {
-        setCellState(cell, CELL_STATE.DISABLED);
-        cell.title = UI_TEXT.ERROR_FETCH_FAILED;
-      } else {
-        setCellState(cell, CELL_STATE.VALUE, { value });
-      }
+      applyCachedValue(cell, cachedEntry, resultIndex);
     } else if (!columnEnabled && !busy) {
       setCellState(cell, CELL_STATE.DISABLED);
     }
   });
+}
+
+/**
+ * Render one variant cell from its cache entry.
+ *
+ * The ERROR tooltip is only correct once we actually attempted this variant.
+ * An absent cache entry means "never fetched" (or cache expired), which is not
+ * an error — showing "Fetch failed" there told users their untouched rows had
+ * failed. Only a recorded entry with a missing value counts as a failure.
+ */
+function applyCachedValue(
+  cell: HTMLElement,
+  cachedEntry: { variants?: Array<string | number | null>; errored?: boolean } | null | undefined,
+  resultIndex: number
+): void {
+  const value = cachedEntry?.variants?.[resultIndex];
+  if (value === null || value === undefined) {
+    setCellState(cell, CELL_STATE.DISABLED);
+    if (cachedEntry) cell.title = UI_TEXT.ERROR_FETCH_FAILED;
+    else cell.title = '';
+  } else {
+    setCellState(cell, CELL_STATE.VALUE, { value });
+  }
 }
 
 export function toggleCellDisabledState(cell: HTMLElement, isDisabled: boolean, disabledTitle: string): void {
@@ -282,13 +317,7 @@ export function toggleColumnState(columnIndex: number, isEnabled: boolean): void
       if (!query) return;
       const cachedEntry = getFromLocalStorage(query, region, deviceTypes);
       const resultIndex = columnIndex - COLUMN_INDEX.QUOTED;
-      const value = cachedEntry?.variants?.[resultIndex];
-      if (value === null || value === undefined) {
-        setCellState(cell, CELL_STATE.DISABLED);
-        cell.title = UI_TEXT.ERROR_FETCH_FAILED;
-      } else {
-        setCellState(cell, CELL_STATE.VALUE, { value });
-      }
+      applyCachedValue(cell, cachedEntry, resultIndex);
     } else if (!isEnabled && !busy) {
       setCellState(cell, CELL_STATE.DISABLED);
     }
@@ -373,4 +402,3 @@ function copyRowToClipboard(row: HTMLTableRowElement): void {
 }
 
 export { setCellState };
-export const __test__ = { getRowValues };

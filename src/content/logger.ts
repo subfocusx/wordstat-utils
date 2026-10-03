@@ -13,6 +13,9 @@ export interface LogEntry {
 
 const LEVEL_RANK: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
+/** Last payload written to localStorage; used to skip redundant writes. */
+let lastPersistedPayload: string | null = null;
+
 let ring: LogEntry[] = [];
 
 function isEnabled(level: LogLevel): boolean {
@@ -84,6 +87,7 @@ export function getLogs(): LogEntry[] {
 /** Clear the in-memory ring buffer and any persisted log snapshot. */
 export function clearLogs(): void {
   ring = [];
+  lastPersistedPayload = null;
   try {
     localStorage.removeItem(LS_LOG_KEY);
   } catch {
@@ -91,20 +95,54 @@ export function clearLogs(): void {
   }
 }
 
+/**
+ * Restore the persisted ring.
+ *
+ * Anything that is not a well-formed LogEntry is dropped, and the result is
+ * capped at LOG_BUFFER_SIZE: an unbounded or hand-edited payload used to be
+ * adopted verbatim, so a corrupt value could grow the ring past its cap and
+ * every subsequent persist would re-serialize it.
+ */
 export function loadLogs(): void {
+  let parsed: unknown;
   try {
     const raw = localStorage.getItem(LS_LOG_KEY);
     if (!raw) return;
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) ring = parsed;
+    parsed = JSON.parse(raw);
   } catch {
     // Malformed persisted logs are simply discarded.
+    return;
   }
+  if (!Array.isArray(parsed)) return;
+  const valid = parsed.filter(isLogEntry);
+  ring = valid.slice(-LOG_BUFFER_SIZE);
 }
 
+function isLogEntry(value: unknown): value is LogEntry {
+  if (typeof value !== 'object' || value === null) return false;
+  const entry = value as Partial<LogEntry>;
+  return (
+    typeof entry.ts === 'number' &&
+    typeof entry.msg === 'string' &&
+    typeof entry.level === 'string' &&
+    entry.level in LEVEL_RANK
+  );
+}
+
+/**
+ * Write the ring to localStorage, skipping redundant writes.
+ *
+ * Every warn/error used to re-serialize the whole ring and hit localStorage
+ * even when nothing had changed since the last write. Comparing against the
+ * last written payload makes repeats free while keeping the persisted log
+ * immediately readable (no timer, no lost entries on unload).
+ */
 function persist(): void {
+  const payload = JSON.stringify(ring);
+  if (payload === lastPersistedPayload) return;
   try {
-    localStorage.setItem(LS_LOG_KEY, JSON.stringify(ring));
+    localStorage.setItem(LS_LOG_KEY, payload);
+    lastPersistedPayload = payload;
   } catch {
     // localStorage may be unavailable or full; the ring buffer still holds logs.
   }
